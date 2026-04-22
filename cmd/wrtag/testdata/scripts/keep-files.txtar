@@ -7,47 +7,49 @@ exec tag write kat_moda/*.flac musicbrainz_albumid 'e47d04a4-7460-427d-a731-cc82
 env WRTAG_PATH_FORMAT='albums/{{ .Release.Title | safepath }}/{{ .Track.Position }}{{ .Ext }}'
 env WRTAG_KEEP_FILE=
 
-# move with no keep-file setting, no files kept
+# copy with no keep-file setting, no files kept
 exec wrtag copy -yes kat_moda/
 exec find albums
 ! stdout keep-me
+exec rm -r albums
 
 env WRTAG_KEEP_FILE=keep-me-1,keep-me-2,im-missing-thats-fine
 
-# now with keep-file setting
+# copy with exact keep-file setting
 exec wrtag copy -yes kat_moda/
 exec find albums
 stdout '^albums/Kat Moda/keep-me-1$'
 stdout '^albums/Kat Moda/keep-me-2$'
-
-# same for moves
 exec rm -r albums
-exec wrtag move -yes kat_moda/
-exec find albums
-stdout '^albums/Kat Moda/keep-me-1$'
-stdout '^albums/Kat Moda/keep-me-2$'
 
 # wildcard pattern matches files at root
-exec rm -r albums
 env WRTAG_KEEP_FILE=*.txt
 exec wrtag copy -yes kat_moda/
 exec find albums
 stdout '^albums/Kat Moda/notes.txt$'
 ! stdout keep-me
+exec rm -r albums
 
 # wildcard pattern matches files in disc subdir, flattened into dest
-exec rm -r albums
-env WRTAG_KEEP_FILE=*.log
+env WRTAG_KEEP_FILE=disc*.log
 exec wrtag copy -yes kat_moda/
 exec find albums
 stdout '^albums/Kat Moda/disc1.log$'
 stdout '^albums/Kat Moda/disc2.log$'
+exec rm -r albums
 
 # duplicate dest from two disc subdirs with same filename errors
-exec rm -r albums
 env WRTAG_KEEP_FILE=dupe.log
 ! exec wrtag copy -yes kat_moda/
 stderr 'duplicate dest path'
+exec rm -rf albums
+
+# move with keep-file setting (last since it relocates audio files)
+env WRTAG_KEEP_FILE=keep-me-1,keep-me-2,im-missing-thats-fine
+exec wrtag move -yes kat_moda/
+exec find albums
+stdout '^albums/Kat Moda/keep-me-1$'
+stdout '^albums/Kat Moda/keep-me-2$'
 
 -- kat_moda/keep-me-1 --
 oh please keep me, don't delete me
