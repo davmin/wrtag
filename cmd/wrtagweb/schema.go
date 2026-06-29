@@ -25,11 +25,12 @@ const (
 )
 
 const (
-	OperationCopy = "copy"
-	OperationMove = "move"
+	OperationCopy    = "copy"
+	OperationMove    = "move"
+	OperationReflink = "reflink"
 )
 
-//go:generate go tool sqlbgen -to schema.gen.go -generated ID Job
+//go:generate go tool sqlbgen type Job generated ID -- schema.gen.go
 type Job struct {
 	ID            uint64
 	Status        JobStatus

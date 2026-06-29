@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.32.0](https://github.com/sentriz/wrtag/compare/v0.31.0...v0.32.0) (2026-06-04)
+
+
+### Features
+
+* **ci:** update golangci-lint ([0281bd1](https://github.com/sentriz/wrtag/commit/0281bd19389b7373f3b897e33cedce8d77dab614))
+* **lyrics:** bump lrclib rate limit ([1a1b895](https://github.com/sentriz/wrtag/commit/1a1b89507c835b37c71fdf4ae0194386da2fcdd4)), closes [#231](https://github.com/sentriz/wrtag/issues/231)
+* **normtag:** add more alts ([945f036](https://github.com/sentriz/wrtag/commit/945f03696442bcb08153df735de5d00e2d61e725))
+* **pathformat:** add releaseEn, releaseGroupEn, releaseOrGroupEn helpers ([1852151](https://github.com/sentriz/wrtag/commit/1852151e762d411d5e2a6a9fed7e27c2312312ad)), closes [#137](https://github.com/sentriz/wrtag/issues/137)
+* **researchlink:** add mbid data ([cd55233](https://github.com/sentriz/wrtag/commit/cd552338232adc9175491a6b1508207c615ce78a))
+* **wrtag:** add http retries ([1f00f00](https://github.com/sentriz/wrtag/commit/1f00f005cf10dad34bb1623c1176040d42b607c7)), closes [#231](https://github.com/sentriz/wrtag/issues/231)
+* **wrtagweb:** update to htmx 4 ([bd33a7b](https://github.com/sentriz/wrtag/commit/bd33a7b88c5af1cbe6453353dd96cee0843dd532))
+* **wrtag:** write LYRICIST, CONDUCTOR, PRODUCER, ARRANGER related fields ([10dd02a](https://github.com/sentriz/wrtag/commit/10dd02a41f94f0734d9836f3f3e1fec55f024953))
+* **wrtag:** write MUSICBRAINZ_REMIXERID and MUSICBRAINZ_COMPOSERID ([dc8d525](https://github.com/sentriz/wrtag/commit/dc8d525ac50358ace9160d282bb00948cd585e38))
+
+
+### Bug Fixes
+
+* **docker:** run essentia-extractors stage on BUILDPLATFORM ([9f6f73b](https://github.com/sentriz/wrtag/commit/9f6f73b787919a64a722b9925f4dc6b88e4f5a87))
+* **researchlink:** render MBID only on positive match ([a310a15](https://github.com/sentriz/wrtag/commit/a310a151145d7f741a59c9883b9fb3abfb537a90))
+
+## [0.31.0](https://github.com/sentriz/wrtag/compare/v0.30.0...v0.31.0) (2026-05-15)
+
+
+### Features
+
+* **normtag:** add more artist credits ([fec4b6e](https://github.com/sentriz/wrtag/commit/fec4b6e433cb860ca27dd367d84278f90c7bda21))
+* **wrtag:** trim very long filenames ([6b34ac7](https://github.com/sentriz/wrtag/commit/6b34ac7109150372997de535961f40260450e24b)), closes [#224](https://github.com/sentriz/wrtag/issues/224)
+
+
+### Bug Fixes
+
+* **coverparse:** filter more spectrograms ([4a6b4fd](https://github.com/sentriz/wrtag/commit/4a6b4fde187095d0de91adb0732cc05cd62b5e3b))
+* **test:** skip case sensitivity check on darwin ([#219](https://github.com/sentriz/wrtag/issues/219)) ([1152eb6](https://github.com/sentriz/wrtag/commit/1152eb65fa9e6922037d3c7e853d6038b274d51b))
+
 ## [0.30.0](https://github.com/sentriz/wrtag/compare/v0.20.0...v0.30.0) (2026-04-07)
 
 

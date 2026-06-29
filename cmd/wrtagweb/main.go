@@ -30,6 +30,7 @@ import (
 	"syscall"
 	"time"
 
+	"go.senan.xyz/sqlitenotify"
 	"go.senan.xyz/wrtag"
 	wrtagflag "go.senan.xyz/wrtag/cmd/internal/wrtagflag"
 	"go.senan.xyz/wrtag/cmd/internal/wrtaglog"
@@ -121,7 +122,7 @@ func main() {
 	ctx := context.Background()
 	if lev := slog.LevelDebug; slog.Default().Enabled(context.Background(), lev) {
 		ctx = sqlb.WithLogFunc(ctx, func(ctx context.Context, typ string, query string, duration time.Duration) {
-			slog.Log(ctx, lev, typ, "took", duration, "query", query)
+			slog.Log(ctx, lev, typ, "took", duration, "query", query) //nolint:sloglint // message comes from sqlb log callback
 		})
 	}
 
@@ -133,8 +134,6 @@ func main() {
 	var sse broadcast[uint64]
 	jobSSENew := func() { sse.send(0) }
 	jobSSEUpdate := func(id uint64) { sse.send(id) }
-
-	var jobQueue = make(chan uint64, 32_768)
 
 	mux := http.NewServeMux()
 
@@ -164,25 +163,30 @@ func main() {
 
 		jl, err := listJobs(ctx, db, filter, search, page, listJobsPageSize)
 		if err != nil {
-			respErrf(w, http.StatusInternalServerError, "error listing jobs: %v", err)
+			respErr(w, http.StatusInternalServerError, "error listing jobs")
 			return
 		}
-		respTmpl(w, "jobs", jl)
+		respTmpl(w, http.StatusOK, "jobs", jl)
 	})
 
 	mux.HandleFunc("POST /jobs", func(w http.ResponseWriter, r *http.Request) {
 		operationStr := r.FormValue("operation")
+		path := r.FormValue("path")
+
+		respErr := func(code int, msg string) {
+			respTmpl(w, code, "job-import", struct{ Operation, Error string }{operationStr, msg})
+		}
+
 		if _, err := wrtagflag.OperationByName(operationStr, false); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			respErr(http.StatusBadRequest, err.Error())
 			return
 		}
-		path := r.FormValue("path")
 		if path == "" {
-			respErrf(w, http.StatusBadRequest, "no path provided")
+			respErr(http.StatusBadRequest, "no path provided")
 			return
 		}
 		if !filepath.IsAbs(path) {
-			respErrf(w, http.StatusInternalServerError, "filepath not abs")
+			respErr(http.StatusBadRequest, "filepath not absolute")
 			return
 		}
 		path = filepath.Clean(path)
@@ -191,14 +195,13 @@ func main() {
 
 		var job Job
 		if err := sqlb.QueryRow(ctx, db, &job, "insert into jobs (source_path, operation, time) values (?, ?, ?) returning *", path, operationStr, time.Now()); err != nil {
-			http.Error(w, fmt.Sprintf("error saving job: %v", err), http.StatusInternalServerError)
+			respErr(http.StatusInternalServerError, fmt.Sprintf("error saving job: %v", err))
 			return
 		}
 
-		respTmpl(w, "job-import", struct{ Operation string }{Operation: operationStr})
+		respTmpl(w, http.StatusOK, "job-import", struct{ Operation, Error string }{Operation: operationStr})
 
 		jobSSENew()
-		jobQueue <- job.ID
 	})
 
 	mux.HandleFunc("GET /jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
@@ -208,10 +211,10 @@ func main() {
 
 		var job Job
 		if err := sqlb.QueryRow(ctx, db, &job, "select * from jobs where id=?", id); err != nil {
-			respErrf(w, http.StatusInternalServerError, "error getting job")
+			respErr(w, http.StatusInternalServerError, "error getting job")
 			return
 		}
-		respTmpl(w, "job", job)
+		respTmpl(w, http.StatusOK, "job", job)
 	})
 
 	mux.HandleFunc("PUT /jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
@@ -228,14 +231,13 @@ func main() {
 
 		var job Job
 		if err := sqlb.QueryRow(ctx, db, &job, "update jobs set confirm=?, use_mbid=?, status=?, updated_time=? where id=? and status<>? returning *", confirm, useMBID, StatusEnqueued, time.Now(), id, StatusInProgress); err != nil {
-			respErrf(w, http.StatusInternalServerError, "error getting job")
+			respErr(w, http.StatusInternalServerError, "couldn't update job")
 			return
 		}
 
-		respTmpl(w, "job", job)
+		respTmpl(w, http.StatusOK, "job", job)
 
 		jobSSENew()
-		jobQueue <- job.ID
 	})
 
 	mux.HandleFunc("DELETE /jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
@@ -244,7 +246,8 @@ func main() {
 		ctx := r.Context()
 
 		if err := sqlb.Exec(ctx, db, "delete from jobs where id=? and status<>?", id, StatusInProgress); err != nil {
-			respErrf(w, http.StatusInternalServerError, "error getting job")
+			slog.ErrorContext(ctx, "delete job", "id", id, "err", err)
+			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 		jobSSENew()
@@ -265,7 +268,7 @@ func main() {
 					dirs = append(dirs, filepath.Join(path, entry.Name()))
 				}
 			}
-			respTmpl(w, "dropdown", dirs)
+			respTmpl(w, http.StatusOK, "dropdown", dirs)
 			return
 		}
 
@@ -276,7 +279,7 @@ func main() {
 					dirs = append(dirs, match)
 				}
 			}
-			respTmpl(w, "dropdown", dirs)
+			respTmpl(w, http.StatusOK, "dropdown", dirs)
 			return
 		}
 	})
@@ -286,15 +289,14 @@ func main() {
 
 		jl, err := listJobs(ctx, db, "", "", 0, listJobsPageSize)
 		if err != nil {
-			respErrf(w, http.StatusInternalServerError, "error listing jobs: %v", err)
+			respErr(w, http.StatusInternalServerError, "error listing jobs")
 			return
 		}
-		respTmpl(w, "index", struct {
+		respTmpl(w, http.StatusOK, "index", struct {
 			jobsListing
 			Operation string
-		}{
-			jl, OperationCopy,
-		})
+			Error     string
+		}{jl, OperationCopy, ""})
 	})
 
 	mux.Handle("/", http.FileServer(http.FS(ui)))
@@ -340,12 +342,22 @@ func main() {
 		}
 
 		jobSSENew()
-		jobQueue <- job.ID
 	})
 
 	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	errgrp, ctx := errgroup.WithContext(ctx)
+
+	if err := sqlb.Exec(ctx, db, "update jobs set status=? where status in (?, ?)", StatusEnqueued, StatusInProgress, StatusEnqueued); err != nil {
+		slog.ErrorContext(ctx, "update old jobs", "err", err)
+		return
+	}
+
+	var dbNotify sqlitenotify.Notifier
+	errgrp.Go(func() error {
+		defer logJob("watch db")()
+		return dbNotify.Start(ctx, sqlitenotify.SQLite(db))
+	})
 
 	errgrp.Go(func() error {
 		defer logJob("http", "addr", *listenAddr)()
@@ -386,29 +398,14 @@ func main() {
 		errgrp.Go(func() error {
 			defer logJob("process jobs", "worker", w)()
 
-			for {
-				select {
-				case <-ctx.Done():
-					return nil
-				case jobID := <-jobQueue:
-					if err := processJob(ctx, cfg, notifs, researchLinkQuerier, *publicURL, db, jobSSEUpdate, jobID); err != nil {
-						return fmt.Errorf("next job: %w", err)
-					}
+			for range dbNotify.Listen(ctx, 200*time.Millisecond, 12*time.Hour) {
+				if err := processJobs(ctx, cfg, notifs, researchLinkQuerier, *publicURL, db, jobSSEUpdate); err != nil {
+					return fmt.Errorf("process jobs: %w", err)
 				}
 			}
+			return nil
 		})
 	}
-
-	// restart old jobs just in case the process was killed abruptly last time
-	errgrp.Go(func() error {
-		for job, err := range sqlb.Rows[Job](ctx, db, "update jobs set status=? where status in (?, ?) returning *", StatusEnqueued, StatusInProgress, StatusEnqueued) {
-			if err != nil {
-				return fmt.Errorf("iter old jobs: %w", err)
-			}
-			jobQueue <- job.ID
-		}
-		return nil
-	})
 
 	if err := errgrp.Wait(); err != nil {
 		slog.Error("wait for jobs", "err", err)
@@ -416,16 +413,24 @@ func main() {
 	}
 }
 
-func processJob(ctx context.Context, cfg *wrtag.Config, notifs *notifications.Notifications, researchLinkQuerier *researchlink.Builder, publicURL string, db *sql.DB, jobSSEUpdate func(uint64), jobID uint64) error {
-	var job Job
-	err := sqlb.QueryRow(ctx, db, &job, "update jobs set status=? where id=? and status=? returning *", StatusInProgress, jobID, StatusEnqueued)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil
+func processJobs(ctx context.Context, cfg *wrtag.Config, notifs *notifications.Notifications, researchLinkQuerier *researchlink.Builder, publicURL string, db *sql.DB, jobSSEUpdate func(uint64)) error {
+	for {
+		var job Job
+		err := sqlb.QueryRow(ctx, db, &job, "update jobs set status=? where id = (select id from jobs where status=? order by id limit 1) returning *", StatusInProgress, StatusEnqueued)
+		if errors.Is(err, sql.ErrNoRows) {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if err := processJob(ctx, cfg, notifs, researchLinkQuerier, publicURL, db, jobSSEUpdate, job); err != nil {
+			return err
+		}
 	}
-	if err != nil {
-		return err
-	}
+	return nil
+}
 
+func processJob(ctx context.Context, cfg *wrtag.Config, notifs *notifications.Notifications, researchLinkQuerier *researchlink.Builder, publicURL string, db *sql.DB, jobSSEUpdate func(uint64), job Job) error {
 	jobSSEUpdate(job.ID)
 	defer jobSSEUpdate(job.ID)
 
@@ -441,13 +446,8 @@ func processJob(ctx context.Context, cfg *wrtag.Config, notifs *notifications.No
 
 	searchResult, processErr := wrtag.ProcessDir(ctx, cfg, op, job.SourcePath, ic, job.UseMBID)
 
-	if searchResult != nil && searchResult.Query.Artist != "" {
-		researchLinks, err := researchLinkQuerier.Build(researchlink.Query{
-			Artist:  searchResult.Query.Artist,
-			Album:   searchResult.Query.Release,
-			Barcode: searchResult.Query.Barcode,
-			Date:    searchResult.Query.Date,
-		})
+	if searchResult != nil {
+		researchLinks, err := researchLinkQuerier.Build(wrtagflag.ResearchQuery(searchResult, processErr == nil))
 		if err != nil {
 			return fmt.Errorf("build links: %w", err)
 		}
@@ -462,7 +462,9 @@ func processJob(ctx context.Context, cfg *wrtag.Config, notifs *notifications.No
 		}
 	}
 
-	job.SearchResult = sqlb.NewJSON(searchResult)
+	if searchResult != nil {
+		job.SearchResult = sqlb.NewJSON(searchResult)
+	}
 	job.Confirm = false
 
 	if processErr != nil {
@@ -506,7 +508,7 @@ var tmplBuffPool = sync.Pool{
 	New: func() any { return new(bytes.Buffer) },
 }
 
-func respTmpl(w http.ResponseWriter, name string, data any) {
+func respTmpl(w http.ResponseWriter, code int, name string, data any) {
 	buff, _ := tmplBuffPool.Get().(*bytes.Buffer)
 	defer tmplBuffPool.Put(buff)
 	buff.Reset()
@@ -516,15 +518,15 @@ func respTmpl(w http.ResponseWriter, name string, data any) {
 		slog.Error("error executing template", "err", err)
 		return
 	}
+	w.WriteHeader(code)
 	if _, err := io.Copy(w, buff); err != nil {
 		slog.Error("copy template data", "err", err)
 		return
 	}
 }
 
-func respErrf(w http.ResponseWriter, code int, f string, a ...any) {
-	w.WriteHeader(code)
-	respTmpl(w, "error", fmt.Sprintf(f, a...))
+func respErr(w http.ResponseWriter, code int, msg string) { //nolint:unparam
+	respTmpl(w, code, "req-error", msg)
 }
 
 const listJobsPageSize = 20
@@ -562,7 +564,7 @@ func listJobs(ctx context.Context, db *sql.DB, status JobStatus, search string, 
 		return jobsListing{}, fmt.Errorf("list jobs: %w", err)
 	}
 
-	return jobsListing{status, search, page, pageCount, total, jobs}, nil
+	return jobsListing{Filter: status, Search: search, Page: page, PageCount: pageCount, Total: total, Jobs: jobs}, nil
 }
 
 func jobNotificationMessage(publicURL string, job Job) string {

@@ -191,12 +191,7 @@ func runOperation(
 		return fmt.Errorf("flush table: %w", err)
 	}
 
-	links, err := researchLinks.Build(researchlink.Query{
-		Artist:  r.Query.Artist,
-		Album:   r.Query.Release,
-		Barcode: r.Query.Barcode,
-		Date:    r.Query.Date,
-	})
+	links, err := researchLinks.Build(wrtagflag.ResearchQuery(r, searchErr == nil))
 	if err != nil {
 		return fmt.Errorf("research search: %w", err)
 	}
@@ -224,7 +219,7 @@ func runSync(ctx context.Context, cfg *wrtag.Config, stats *syncStats, dirs []st
 				return nil
 			})
 			if err != nil {
-				slog.Error("walking paths", "err", err)
+				slog.ErrorContext(ctx, "walking paths", "err", err)
 				continue
 			}
 		}
