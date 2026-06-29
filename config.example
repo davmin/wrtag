@@ -1,15 +1,16 @@
 # path-format is rooted in your destination music dir. the template is fed with musicbrainz release data
 # see go.senan.xyz/wrtag/musicbrainz for type definitions
 
-#path-format /mnt/music/albums/{{ artists .Release.Artists | sort | join "; " | safepath }}/({{ .Release.ReleaseGroup.FirstReleaseDate.Year }}) {{ .Release.Title | safepath }}{{ if not (eq .ReleaseDisambiguation "") }} ({{ .ReleaseDisambiguation | safepath }}){{ end }}/{{ pad0 2 .Track.Position }}.{{ .Media.TrackCount | pad0 2 }} {{ if .IsCompilation }}{{ artistsString .Track.Artists | safepath }} - {{ end }}{{ .Track.Title | safepath }}{{ .Ext }}
+#path-format /mnt/music/albums/{{ artistsEn .Release.Artists | sort | join "; " | safepath }}/({{ .Release.ReleaseGroup.FirstReleaseDate.Year }}) {{ releaseOrGroupEn .Release | safepath }}{{ with disambiguation .Release }} ({{ . | safepath }}){{ end }}/{{ pad0 2 .Track.Position }}.{{ .Media.TrackCount | pad0 2 }} {{ if isCompilation .Release.ReleaseGroup }}{{ artistsEnString .Track.Artists | safepath }} - {{ end }}{{ .Track.Title | safepath }}{{ .Ext }}
 
-# search links are shortcuts on for the ui to help research data, and populate missing musicbrainz data. the template is fed with tag data
-# see go.senan.xyz/tags/tagcommon for type definitions
+# research links are shortcuts on for the ui to help research data, to help you adding missing musicbrainz data
+# see "type Query struct {" in researchlink.go for type definitions
 
 #research-link kagi https://kagi.com/search?l=4&q={{ printf "%s %s" .Artist .Album | urlquery }}
 #research-link juno https://www.junodownload.com/search/?q%5Ball%5D%5B%5D={{ printf "%s %s" .Artist .Album | urlquery }}
 #research-link deezer https://www.deezer.com/search/{{ printf "%s %s" .Artist .Album | urlquery }}
-#research-link harmony https://harmony.pulsewidth.org.uk/release?url=&gtin={{ .Barcode | urlquery }}&region=&deezer=&itunes=&spotify=&tidal=&beatport=
+#research-link harmony https://harmony.pulsewidth.org.uk/release?url={{ if .MBID }}https%3A%2F%2Fmusicbrainz.org%2Frelease%2F{{ .MBID }}{{ end }}&gtin={{ .Barcode | urlquery }}&region=&deezer=&itunes=&spotify=&tidal=&beatport=
+#research-link harmony-actions {{ if .MBID }}https://harmony.pulsewidth.org.uk/release/actions?release_mbid={{ .MBID }}{{ end }}
 #research-link musicbrainz https://musicbrainz.org/taglookup?tag-lookup.artist={{ .Artist | urlquery }}&tag-lookup.release={{ .Album | urlquery }}
 #research-link discogs https://www.discogs.com/search/?type=release&q={{ printf "%s %s" .Artist .Album | urlquery }}&barcode={{ .Barcode | urlquery }}
 #research-link google https://www.google.com/search?q={{ printf "%s %s" .Artist .Album | urlquery }}

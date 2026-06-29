@@ -39,27 +39,13 @@ import (
 )
 
 var (
-	// ErrScoreTooLow is returned when the match confidence between local tracks and
-	// MusicBrainz data is below the required threshold.
-	ErrScoreTooLow = errors.New("score too low")
-
-	// ErrTrackCountMismatch is returned when the number of tracks in the local directory
-	// doesn't match the number of tracks in the MusicBrainz release.
+	ErrScoreTooLow        = errors.New("score too low")
 	ErrTrackCountMismatch = errors.New("track count mismatch")
-
-	// ErrNoTracks is returned when no audio tracks are found in the source directory.
-	ErrNoTracks = errors.New("no tracks in dir")
-
-	// ErrNotSortable is returned when the tracks in a directory cannot be reliably sorted
-	// due to missing track numbers or numerical identifiers in filenames.
-	ErrNotSortable = errors.New("tracks in dir can't be sorted")
-
-	// ErrSelfCopy is returned when attempting to copy a file to itself.
-	ErrSelfCopy = errors.New("can't copy self to self")
+	ErrNoTracks           = errors.New("no tracks in dir")
+	ErrNotSortable        = errors.New("tracks in dir can't be sorted")
+	ErrSelfCopy           = errors.New("can't copy self to self")
 )
 
-// IsNonFatalError determines whether an error is non-fatal during processing.
-// Non-fatal errors include low match scores and track count mismatches.
 func IsNonFatalError(err error) bool {
 	return errors.Is(err, ErrScoreTooLow) || errors.Is(err, ErrTrackCountMismatch)
 }
@@ -67,37 +53,20 @@ func IsNonFatalError(err error) bool {
 // The minimum score required for a MusicBrainz match to be considered valid.
 const minScore = 95
 
-// Max number of genres to write to a track.
 const numTrackGenres = 6
 
 const (
-	// thresholdSizeClean is the maximum size (20MB) of a directory that can be
-	// automatically cleaned up.
-	thresholdSizeClean uint64 = 20 * 1e6 // 20 MB
-
-	// thresholdSizeTrim is the maximum size (3GB) of files that can be automatically
-	// trimmed from a destination directory.
-	thresholdSizeTrim uint64 = 3000 * 1e6 // 3000 MB
+	thresholdSizeClean uint64 = 20 * 1e6   // 20 MB
+	thresholdSizeTrim  uint64 = 3000 * 1e6 // 3000 MB
 )
 
 // SearchResult contains the results of a MusicBrainz lookup and potential import operation.
 type SearchResult struct {
-	// Release contains the matched MusicBrainz release data
-	Release *musicbrainz.Release
-
-	// Query contains the search parameters used for the MusicBrainz lookup
-	Query musicbrainz.ReleaseQuery
-
-	// Score indicates the confidence of the match (0-100)
-	Score float64
-
-	// DestDir is the destination directory path where files were or would be placed
-	DestDir string
-
-	// Diff contains the differences between local tags and MusicBrainz tags
-	Diff []Diff
-
-	// OriginFile contains information from any gazelle-origin file found in the source directory
+	Release    *musicbrainz.Release
+	Query      musicbrainz.ReleaseQuery
+	Score      float64
+	DestDir    string
+	Diff       []Diff
 	OriginFile *originfile.OriginFile
 }
 
@@ -105,44 +74,22 @@ type SearchResult struct {
 type ImportCondition uint8
 
 const (
-	// HighScore requires the match to have a high confidence score.
 	HighScore ImportCondition = iota
-
-	// HighScoreOrMBID accepts either a high score or a matching MusicBrainz ID.
 	HighScoreOrMBID
-
-	// Always always imports regardless of score.
 	Always
 )
 
 // Config contains configuration options for processing music directories.
 type Config struct {
-	// MusicBrainzClient is used to search and retrieve release data from MusicBrainz
-	MusicBrainzClient musicbrainz.MBClient
-
-	// CoverArtArchiveClient is used to retrieve cover art
+	MusicBrainzClient     musicbrainz.MBClient
 	CoverArtArchiveClient musicbrainz.CAAClient
-
-	// PathFormat defines the directory structure for organising music files
-	PathFormat pathformat.Format
-
-	// DiffWeights defines the relative importance of different tags when calculating match scores
-	DiffWeights DiffWeights
-
-	// TagConfig defines options for modifying the default tag set
-	TagConfig TagConfig
-
-	// KeepFiles specifies files that should be preserved during processing
-	KeepFiles map[string]struct{}
-
-	// Addons are plugins that can perform additional processing after the main import
-	Addons []addon.Addon
-
-	// UpgradeCover specifies whether to attempt to replace existing covers with better versions
-	UpgradeCover bool
-
-	// FileMode is the mode destination files should be set to
-	FileMode os.FileMode
+	PathFormat            pathformat.Format
+	DiffWeights           DiffWeights
+	TagConfig             TagConfig
+	KeepFiles             map[string]struct{}
+	Addons                []addon.Addon
+	UpgradeCover          bool
+	FileMode              os.FileMode
 }
 
 // ProcessDir processes a music directory by looking up metadata on MusicBrainz and
@@ -267,7 +214,20 @@ func ProcessDir(
 		if origDestDir != destDir {
 			destPath = filepath.Join(destDir, strings.TrimPrefix(destPath, origDestDir))
 		}
+		destPath = fileutil.TrimLength(destPath, 255)
 		destPaths = append(destPaths, destPath)
+	}
+
+	var coverTmp string
+	if op.CanModifyDest() && (cover == "" || cfg.UpgradeCover) {
+		var err error
+		coverTmp, err = maybeFetchUpgradedCover(ctx, &cfg.CoverArtArchiveClient, release, cover, maxCoverSizeBytes)
+		if err != nil {
+			return nil, fmt.Errorf("fetch cover: %w", err)
+		}
+		if coverTmp != "" {
+			defer os.Remove(coverTmp) //nolint:errcheck
+		}
 	}
 
 	// lock both source and destination directories
@@ -307,9 +267,9 @@ func ProcessDir(
 		}
 	}
 
-	destCover, err := processCover(ctx, cfg, op, dc, release, destDir, cover)
+	destCover, err := processCover(ctx, op, dc, destDir, cover, coverTmp, cfg.FileMode)
 	if err != nil {
-		return nil, fmt.Errorf("process cover: %w", err)
+		return nil, fmt.Errorf("place cover: %w", err)
 	}
 
 	// process addons with new files
@@ -530,23 +490,29 @@ func WriteRelease(
 	disambiguationParts := trimZero(release.ReleaseGroup.Disambiguation, release.Disambiguation)
 	disambiguation := strings.Join(disambiguationParts, ", ")
 
-	var remixers, remixersCredit []string
-	for _, r := range trk.Recording.Relations {
-		if r.Artist.ID != "" && r.Type == "remixer" {
-			remixers = append(remixers, r.Artist.Name)
-			remixersCredit = append(remixersCredit, cmp.Or(r.TargetCredit, r.Artist.Name))
-		}
-	}
-
-	var composers, composersCredit []string
-	for _, rel := range trk.Recording.Relations {
-		for _, rel := range rel.Work.Relations {
-			if rel.Artist.ID != "" && rel.Type == "composer" {
-				composers = append(composers, rel.Artist.Name)
-				composersCredit = append(composersCredit, cmp.Or(rel.TargetCredit, rel.Artist.Name))
+	collectCredits := func(rels []musicbrainz.Relation, typ string) (names, credits, ids []string) {
+		for _, r := range rels {
+			if r.Artist.ID != "" && r.Type == typ {
+				names = append(names, r.Artist.Name)
+				credits = append(credits, cmp.Or(r.TargetCredit, r.Artist.Name))
+				ids = append(ids, r.Artist.ID)
 			}
 		}
+		return
 	}
+
+	remixers, remixersCredit, remixerIDs := collectCredits(trk.Recording.Relations, "remixer")
+	producers, producersCredit, producerIDs := collectCredits(trk.Recording.Relations, "producer")
+	conductors, conductorsCredit, conductorIDs := collectCredits(trk.Recording.Relations, "conductor")
+
+	var workRelations []musicbrainz.Relation
+	for _, r := range trk.Recording.Relations {
+		workRelations = append(workRelations, r.Work.Relations...)
+	}
+
+	composers, composersCredit, composerIDs := collectCredits(workRelations, "composer")
+	lyricists, lyricistsCredit, lyricistIDs := collectCredits(workRelations, "lyricist")
+	arrangers, arrangersCredit, arrangerIDs := collectCredits(workRelations, "arranger")
 
 	// normtag.Set(t, x, trimZero(y)...) so that we clear out tags with no value from the map
 
@@ -588,11 +554,37 @@ func WriteRelease(
 	normtag.Set(t, normtag.Remixers, trimZero(remixers...)...)
 	normtag.Set(t, normtag.RemixerCredit, trimZero(strings.Join(remixersCredit, ", "))...)
 	normtag.Set(t, normtag.RemixersCredit, trimZero(remixersCredit...)...)
+	normtag.Set(t, normtag.MusicBrainzRemixerID, trimZero(remixerIDs...)...)
+
+	normtag.Set(t, normtag.Producer, trimZero(strings.Join(producers, ", "))...)
+	normtag.Set(t, normtag.Producers, trimZero(producers...)...)
+	normtag.Set(t, normtag.ProducerCredit, trimZero(strings.Join(producersCredit, ", "))...)
+	normtag.Set(t, normtag.ProducersCredit, trimZero(producersCredit...)...)
+	normtag.Set(t, normtag.MusicBrainzProducerID, trimZero(producerIDs...)...)
+
+	normtag.Set(t, normtag.Conductor, trimZero(strings.Join(conductors, ", "))...)
+	normtag.Set(t, normtag.Conductors, trimZero(conductors...)...)
+	normtag.Set(t, normtag.ConductorCredit, trimZero(strings.Join(conductorsCredit, ", "))...)
+	normtag.Set(t, normtag.ConductorsCredit, trimZero(conductorsCredit...)...)
+	normtag.Set(t, normtag.MusicBrainzConductorID, trimZero(conductorIDs...)...)
 
 	normtag.Set(t, normtag.Composer, trimZero(strings.Join(composers, ", "))...)
 	normtag.Set(t, normtag.Composers, trimZero(composers...)...)
 	normtag.Set(t, normtag.ComposerCredit, trimZero(strings.Join(composersCredit, ", "))...)
 	normtag.Set(t, normtag.ComposersCredit, trimZero(composersCredit...)...)
+	normtag.Set(t, normtag.MusicBrainzComposerID, trimZero(composerIDs...)...)
+
+	normtag.Set(t, normtag.Lyricist, trimZero(strings.Join(lyricists, ", "))...)
+	normtag.Set(t, normtag.Lyricists, trimZero(lyricists...)...)
+	normtag.Set(t, normtag.LyricistCredit, trimZero(strings.Join(lyricistsCredit, ", "))...)
+	normtag.Set(t, normtag.LyricistsCredit, trimZero(lyricistsCredit...)...)
+	normtag.Set(t, normtag.MusicBrainzLyricistID, trimZero(lyricistIDs...)...)
+
+	normtag.Set(t, normtag.Arranger, trimZero(strings.Join(arrangers, ", "))...)
+	normtag.Set(t, normtag.Arrangers, trimZero(arrangers...)...)
+	normtag.Set(t, normtag.ArrangerCredit, trimZero(strings.Join(arrangersCredit, ", "))...)
+	normtag.Set(t, normtag.ArrangersCredit, trimZero(arrangersCredit...)...)
+	normtag.Set(t, normtag.MusicBrainzArrangerID, trimZero(arrangerIDs...)...)
 
 	normtag.Set(t, normtag.MusicBrainzRecordingID, trimZero(trk.Recording.ID)...)
 	normtag.Set(t, normtag.MusicBrainzTrackID, trimZero(trk.ID)...)
@@ -602,12 +594,9 @@ func WriteRelease(
 // Diff represents a comparison between two tag values, showing the differences
 // using diff-match-patch format for visualization.
 type Diff struct {
-	// Field is the name of the tag field being compared
-	Field string
-	// Before contains the diff segments for the original value
+	Field         string
 	Before, After []dmp.Diff
-	// Equal indicates whether the two values are identical
-	Equal bool
+	Equal         bool
 }
 
 // DiffWeights maps tag field names to their relative importance when calculating match scores.
@@ -764,16 +753,9 @@ type FileSystemOperation interface {
 	CanModifyDest() bool
 
 	// ProcessPath handles transferring a file from src to dest path.
-	// It ensures the destination directory exists and records the path in the DirContext.
-	// The exact behaviour (move/copy/reflink) depends on the specific implementation.
-	// Returns an error if the operation fails.
 	ProcessPath(ctx context.Context, dc DirContext, src, dest string, mode os.FileMode) error
 
-	// PostSource performs any cleanup or post-processing on the source directory
-	// after all files have been processed. For example, removing empty directories
-	// after a move operation.
-	// The limit parameter specifies a boundary directory that should not be removed.
-	// Returns an error if the cleanup operation fails.
+	// PostSource performs any cleanup or post-processing on the source directory after all files have been processed.
 	PostSource(ctx context.Context, dc DirContext, limit string, src string) error
 }
 
@@ -783,29 +765,20 @@ type DirContext struct {
 	knownDestPaths map[string]struct{}
 }
 
-// NewDirContext creates a new DirContext to track destination paths.
 func NewDirContext() DirContext {
 	return DirContext{knownDestPaths: map[string]struct{}{}}
 }
 
-// Move implements FileSystemOperation to move files from source to destination.
 type Move struct {
 	dryRun bool
 }
 
-// NewMove creates a new Move operation with the specified dry-run mode.
-// If dryRun is true, no files will actually be moved.
 func NewMove(dryRun bool) Move { return Move{dryRun: dryRun} }
 
-// CanModifyDest returns whether this operation can modify destination files.
-// For Move operations, this is determined by the dryRun setting.
 func (m Move) CanModifyDest() bool {
 	return !m.dryRun
 }
 
-// ProcessPath moves a file from src to dest, ensuring the destination directory exists.
-// If the operation is in dry-run mode, it will only log the intended action.
-// If src and dest are the same, no action is taken.
 func (m Move) ProcessPath(ctx context.Context, dc DirContext, src, dest string, mode os.FileMode) error {
 	dc.knownDestPaths[dest] = struct{}{}
 
@@ -850,8 +823,6 @@ func (m Move) ProcessPath(ctx context.Context, dc DirContext, src, dest string, 
 	return nil
 }
 
-// PostSource cleans up the source directory after all files have been moved.
-// It removes empty directories up to the specified limit directory.
 func (m Move) PostSource(ctx context.Context, dc DirContext, limit string, src string) error {
 	if limit == "" {
 		panic("empty limit dir")
@@ -879,24 +850,16 @@ func (m Move) PostSource(ctx context.Context, dc DirContext, limit string, src s
 	return nil
 }
 
-// Copy implements FileSystemOperation to copy files from source to destination.
 type Copy struct {
 	dryRun bool
 }
 
-// NewCopy creates a new Copy operation with the specified dry-run mode.
-// If dryRun is true, no files will actually be copied.
 func NewCopy(dryRun bool) Copy { return Copy{dryRun: dryRun} }
 
-// CanModifyDest returns whether this operation can modify destination files.
-// For Copy operations, this is determined by the dryRun setting.
 func (c Copy) CanModifyDest() bool {
 	return !c.dryRun
 }
 
-// ProcessPath copies a file from src to dest, ensuring the destination directory exists.
-// If the operation is in dry-run mode, it will only log the intended action.
-// If src and dest are the same, it returns ErrSelfCopy.
 func (c Copy) ProcessPath(ctx context.Context, dc DirContext, src, dest string, mode os.FileMode) error {
 	dc.knownDestPaths[dest] = struct{}{}
 
@@ -925,32 +888,22 @@ func (c Copy) ProcessPath(ctx context.Context, dc DirContext, src, dest string, 
 	return nil
 }
 
-// PostSource performs any necessary cleanup of the source directory.
-// For Copy operations, this is a no-op since the source files remain in place.
 func (Copy) PostSource(ctx context.Context, dc DirContext, limit string, src string) error {
 	return nil
 }
 
-// Reflink implements FileSystemOperation to copy files using reflink (copy-on-write) when supported.
 type Reflink struct {
 	dryRun bool
 }
 
-// NewReflink creates a new Reflink operation with the specified dry-run mode.
-// If dryRun is true, no files will actually be reflinked.
 func NewReflink(dryRun bool) Reflink {
 	return Reflink{dryRun: dryRun}
 }
 
-// CanModifyDest returns whether this operation can modify destination files.
-// For Reflink operations, this is determined by the dryRun setting.
 func (c Reflink) CanModifyDest() bool {
 	return !c.dryRun
 }
 
-// ProcessPath creates a reflink (copy-on-write) clone of a file from src to dest.
-// If the operation is in dry-run mode, it will only log the intended action.
-// If src and dest are the same, it returns ErrSelfCopy.
 func (c Reflink) ProcessPath(ctx context.Context, dc DirContext, src, dest string, mode os.FileMode) error {
 	dc.knownDestPaths[dest] = struct{}{}
 
@@ -979,8 +932,6 @@ func (c Reflink) ProcessPath(ctx context.Context, dc DirContext, src, dest strin
 	return nil
 }
 
-// PostSource performs any necessary cleanup of the source directory.
-// For Reflink operations, this is a no-op since the source files remain in place.
 func (Reflink) PostSource(ctx context.Context, dc DirContext, limit string, src string) error {
 	return nil
 }
@@ -1078,48 +1029,50 @@ func copyFile(src, dest string) (err error) {
 
 const maxCoverSizeBytes = 8 * 1024 * 1024 // 8 MiB
 
+func maybeFetchUpgradedCover(ctx context.Context, caa *musicbrainz.CAAClient, release *musicbrainz.Release, cover string, maxSize int64) (string, error) {
+	skipFunc := func(resp *http.Response) bool {
+		if resp.ContentLength > maxSize {
+			slog.WarnContext(ctx, "skipping downloading cover which is larger than max size", "size_bytes", resp.ContentLength, "max_size_bytes", maxCoverSizeBytes)
+			return true
+		}
+		if cover == "" {
+			return false
+		}
+		info, err := os.Stat(cover)
+		if err != nil {
+			return false
+		}
+		return resp.ContentLength == info.Size()
+	}
+
+	coverTmp, err := downloadMusicBrainzCover(ctx, caa, release, skipFunc)
+	if err != nil {
+		return "", fmt.Errorf("maybe fetch better cover: %w", err)
+	}
+
+	return coverTmp, nil
+}
+
 func processCover(
-	ctx context.Context, cfg *Config,
-	op FileSystemOperation, dc DirContext, release *musicbrainz.Release, destDir string, cover string,
+	ctx context.Context, op FileSystemOperation, dc DirContext,
+	destDir, cover, coverNew string, mode os.FileMode,
 ) (string, error) {
 	coverPath := func(p string) string {
 		ext := strings.ToLower(filepath.Ext(p))
 		return filepath.Join(destDir, "cover"+ext)
 	}
 
-	if op.CanModifyDest() && (cover == "" || cfg.UpgradeCover) {
-		skipFunc := func(resp *http.Response) bool {
-			if resp.ContentLength > maxCoverSizeBytes {
-				slog.WarnContext(ctx, "skipping downloading cover which is larger than max size", "size_bytes", resp.ContentLength, "max_size_bytes", maxCoverSizeBytes)
-				return true
-			}
-			if cover == "" {
-				return false
-			}
-			info, err := os.Stat(cover)
-			if err != nil {
-				return false
-			}
-			return resp.ContentLength == info.Size()
+	if coverNew != "" {
+		destCover := coverPath(coverNew)
+		if err := (Move{}).ProcessPath(ctx, dc, coverNew, destCover, mode); err != nil {
+			return "", fmt.Errorf("move new cover to dest: %w", err)
 		}
-
-		coverTmp, err := tryDownloadMusicBrainzCover(ctx, &cfg.CoverArtArchiveClient, release, skipFunc)
-		if err != nil {
-			return "", fmt.Errorf("maybe fetch better cover: %w", err)
-		}
-		if coverTmp != "" {
-			destCover := coverPath(coverTmp)
-			if err := (Move{}).ProcessPath(ctx, dc, coverTmp, destCover, cfg.FileMode); err != nil {
-				return "", fmt.Errorf("move new cover to dest: %w", err)
-			}
-			return destCover, nil
-		}
+		return destCover, nil
 	}
 
-	// process any existing cover if we didn't fetch (or find) any from musicbrainz
 	if cover != "" {
 		destCover := coverPath(cover)
-		if err := op.ProcessPath(ctx, dc, cover, destCover, cfg.FileMode); err != nil {
+		if err := op.ProcessPath(ctx, dc, cover, destCover, mode); err != nil {
 			return "", fmt.Errorf("move file to dest: %w", err)
 		}
 		return destCover, nil
@@ -1127,7 +1080,7 @@ func processCover(
 	return "", nil
 }
 
-func tryDownloadMusicBrainzCover(ctx context.Context, caa *musicbrainz.CAAClient, release *musicbrainz.Release, skipFunc func(*http.Response) bool) (string, error) {
+func downloadMusicBrainzCover(ctx context.Context, caa *musicbrainz.CAAClient, release *musicbrainz.Release, skipFunc func(*http.Response) bool) (string, error) {
 	coverURL, err := caa.GetCoverURL(ctx, release)
 	if err != nil {
 		return "", err

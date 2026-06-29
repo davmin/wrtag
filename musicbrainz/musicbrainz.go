@@ -97,13 +97,13 @@ func (c *MBClient) SearchRelease(ctx context.Context, q ReleaseQuery) (*Release,
 		params = append(params, boostField(field("label", strings.ToLower(q.Label)), 3)) // boosted
 	}
 	if q.CatalogueNum != "" {
-		params = append(params, boostField(field("catno", strings.ToLower(q.CatalogueNum)), 3)) // boosted
+		params = append(params, boostField(field("catno", strings.ToLower(q.CatalogueNum)), 2)) // boosted
 	}
 	if q.Barcode != "" {
-		params = append(params, field("barcode", q.Barcode))
+		params = append(params, boostField(field("barcode", q.Barcode), 5)) // boosted, unique per release
 	}
 	if q.NumTracks > 0 {
-		params = append(params, boostField(field("tracks", q.NumTracks), 10)) // boosted
+		params = append(params, boostField(field("tracks", q.NumTracks), 2)) // boosted
 	}
 	if len(params) == 0 {
 		return nil, ErrNoResults
@@ -317,6 +317,7 @@ type Release struct {
 	} `json:"release-events"`
 	PackagingID string      `json:"packaging-id"`
 	LabelInfo   []LabelInfo `json:"label-info"`
+	Aliases     []Alias     `json:"aliases"`
 }
 
 type ReleaseGroup struct {
@@ -330,6 +331,7 @@ type ReleaseGroup struct {
 	ID               string                      `json:"id"`
 	SecondaryTypes   []ReleaseGroupSecondaryType `json:"secondary-types"`
 	Title            string                      `json:"title"`
+	Aliases          []Alias                     `json:"aliases"`
 }
 
 type ReleaseGroupPrimaryType string
@@ -366,14 +368,8 @@ func ArtistsNames(credits []ArtistCredit) []string {
 	}
 	return r
 }
-
 func ArtistsString(credits []ArtistCredit) string {
-	var sb strings.Builder
-	for _, c := range credits {
-		sb.WriteString(c.Artist.Name)
-		sb.WriteString(c.JoinPhrase)
-	}
-	return sb.String()
+	return joinCredits(ArtistsNames(credits), credits)
 }
 
 func ArtistsEnNames(credits []ArtistCredit) []string {
@@ -383,14 +379,8 @@ func ArtistsEnNames(credits []ArtistCredit) []string {
 	}
 	return r
 }
-
 func ArtistsEnString(credits []ArtistCredit) string {
-	var sb strings.Builder
-	for _, c := range credits {
-		sb.WriteString(artistEnName(c.Artist))
-		sb.WriteString(c.JoinPhrase)
-	}
-	return sb.String()
+	return joinCredits(ArtistsEnNames(credits), credits)
 }
 
 func ArtistsCreditNames(credits []ArtistCredit) []string {
@@ -400,54 +390,82 @@ func ArtistsCreditNames(credits []ArtistCredit) []string {
 	}
 	return r
 }
-
 func ArtistsCreditString(credits []ArtistCredit) string {
-	var sb strings.Builder
-	for _, c := range credits {
-		sb.WriteString(c.Name)
-		sb.WriteString(c.JoinPhrase)
-	}
-	return sb.String()
+	return joinCredits(ArtistsCreditNames(credits), credits)
 }
 
-func ArtistsSortNames(sorts []ArtistCredit) []string {
+func ArtistsSortNames(credits []ArtistCredit) []string {
 	var r []string
-	for _, c := range sorts {
+	for _, c := range credits {
 		r = append(r, c.Artist.SortName)
 	}
 	return r
 }
+func ArtistsSortString(credits []ArtistCredit) string {
+	return joinCredits(ArtistsSortNames(credits), credits)
+}
 
-func ArtistsSortString(sorts []ArtistCredit) string {
+func ReleaseEnTitle(release Release) string {
+	return enName(release.Title, release.Aliases)
+}
+
+func ReleaseGroupEnTitle(rg ReleaseGroup) string {
+	return enName(rg.Title, rg.Aliases)
+}
+
+func ReleaseOrGroupEnTitle(release Release) string {
+	if t := ReleaseEnTitle(release); isLatin(t) {
+		return t
+	}
+	if t := ReleaseGroupEnTitle(release.ReleaseGroup); t != "" && isLatin(t) {
+		return t
+	}
+	return release.Title
+}
+
+func ReleaseDisambiguation(release Release) string {
+	var parts []string
+	if release.ReleaseGroup.Disambiguation != "" {
+		parts = append(parts, release.ReleaseGroup.Disambiguation)
+	}
+	if release.Disambiguation != "" {
+		parts = append(parts, release.Disambiguation)
+	}
+	return strings.Join(parts, ", ")
+}
+
+func joinCredits(names []string, credits []ArtistCredit) string {
 	var sb strings.Builder
-	for _, c := range sorts {
-		sb.WriteString(c.Artist.SortName)
+	for i, c := range credits {
+		sb.WriteString(names[i])
 		sb.WriteString(c.JoinPhrase)
 	}
 	return sb.String()
 }
 
 func artistEnName(artist Artist) string {
-	// Sometimes there exists English locale aliases for artists whose name is already
-	// in English. eg. "James Brown" -> "James Joseph Brown". In those cases we'd prefer
-	// to use the orignal name.
-	// Since MusicBrainz can't tell us the locale of the artist name, we guess by looking at the
-	// alphabet used. If so, use the orignal name.
-	if isLatin(artist.Name) {
-		return artist.Name
-	}
+	return enName(artist.Name, artist.Aliases)
+}
 
-	for _, a := range artist.Aliases {
+// enName returns the English locale alias for a name that isn't already in a Latin script,
+// eg "二度寝" -> "Nidone". Names already in a Latin script are returned as-is, since their
+// English aliases are often unwanted expansions eg. "James Brown" -> "James Joseph Brown".
+// MusicBrainz doesn't tell us the locale of the name, so we guess by looking at the alphabet used.
+func enName(name string, aliases []Alias) string {
+	if isLatin(name) {
+		return name
+	}
+	for _, a := range aliases {
 		if isEnLocale(a.Locale) && a.Primary && !a.Ended {
 			return a.Name
 		}
 	}
-	for _, a := range artist.Aliases {
+	for _, a := range aliases {
 		if isEnLocale(a.Locale) && !a.Ended {
 			return a.Name
 		}
 	}
-	return artist.Name
+	return name
 }
 
 const enLocale = "en"
@@ -464,11 +482,6 @@ func IsCompilation(rg ReleaseGroup) bool {
 	return slices.ContainsFunc(rg.Artists, func(ac ArtistCredit) bool {
 		return ac.Artist.ID == variousArtistsMBID
 	})
-}
-
-type GenreInfo struct {
-	Name  string
-	Count uint
 }
 
 func AnyGenres(release *Release) (genres []Genre) {
